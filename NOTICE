@@ -1,0 +1,16 @@
+DiamondFox Root CLI
+Copyright (c) 2026 DiamondFox contributors
+
+The host application source is licensed under the MIT License.
+
+Official binaries may contain separately licensed support payloads that are
+not part of the source distribution. Android Platform Tools files retain their
+respective Google and third-party notices, bundled as NOTICE.txt.
+
+Root support payloads are derived from the Root-My-Galaxy F731U project:
+https://github.com/youyoudezhuzhu/rmg-f731u
+
+The SM-S918B payload adaptations and their upstream baseline are distributed
+under the Apache License, Version 2.0. Official binaries bundle that license as
+ROOT_PAYLOAD_LICENSE.txt. These payloads are not licensed under the host
+application's MIT License.

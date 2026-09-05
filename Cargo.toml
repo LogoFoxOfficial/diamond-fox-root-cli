@@ -1,0 +1,32 @@
+[package]
+name = "diamond-fox-root"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "diamond-fox-root"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5.35", features = ["derive"] }
+directories = "6"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+
+[build-dependencies]
+hex = "0.4"
+serde_json = "1"
+sha2 = "0.10"
+winres = "0.1"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"
+strip = "symbols"
+panic = "abort"
