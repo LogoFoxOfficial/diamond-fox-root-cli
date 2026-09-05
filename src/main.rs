@@ -1,6 +1,7 @@
 mod adb;
 mod builtin;
 mod cli;
+mod error;
 mod interactive;
 mod model;
 mod output;
@@ -18,7 +19,7 @@ fn main() {
     let cli = Cli::parse();
     let reporter = Reporter::new(cli.no_color);
     if let Err(error) = run(cli, &reporter) {
-        reporter.fail(error);
+        reporter.error(error);
         std::process::exit(1);
     }
 }
@@ -59,7 +60,12 @@ fn run(cli: Cli, reporter: &Reporter) -> Result<(), String> {
             let device = adb.select_supported(serial.as_deref())?;
             let snapshot = adb.snapshot(&device.serial)?;
             let packages = installed_packages(&dirs)?;
-            let selected = root::select_package(&packages, &snapshot).ok();
+            let selection = root::select_package(&packages, &snapshot);
+            let selected = selection.as_ref().ok().copied();
+            let gate_warnings = selected
+                .map(|package| package.manifest.gate.warnings(&snapshot))
+                .unwrap_or_default();
+            let gate_error = selection.as_ref().err().cloned();
             let guard = state::guard_for_boot(&dirs, &device.serial, &snapshot.boot_id);
             if json {
                 println!(
@@ -73,6 +79,8 @@ fn run(cli: Cli, reporter: &Reporter) -> Result<(), String> {
                             "name": package.manifest.name,
                             "workflow": package.manifest.workflow,
                         })),
+                        "gate_warnings": gate_warnings,
+                        "gate_error": gate_error,
                         "boot_guard": guard,
                     }))
                     .map_err(|error| error.to_string())?
@@ -87,11 +95,16 @@ fn run(cli: Cli, reporter: &Reporter) -> Result<(), String> {
                 reporter.info(format!("Boot ID: {}", snapshot.boot_id));
                 if let Some(package) = selected {
                     reporter.ok(format!("Root method available: {}", package.manifest.name));
+                    for warning in package.manifest.gate.warnings(&snapshot) {
+                        reporter.warn(warning);
+                    }
                 } else {
-                    reporter.fail("No installed root package matches this exact firmware");
+                    reporter.error(gate_error.unwrap_or_else(|| {
+                        "No installed root package matches this firmware".into()
+                    }));
                 }
                 if let Some(guard) = guard {
-                    reporter.fail(format!("Boot attempt guard: {}", guard.state));
+                    reporter.warn(format!("Boot attempt guard: {}", guard.state));
                 }
             }
         }
@@ -164,9 +177,12 @@ fn run(cli: Cli, reporter: &Reporter) -> Result<(), String> {
         Some(Command::Root { serial, yes }) => {
             let packages = installed_packages(&dirs)?;
             if packages.is_empty() {
-                return Err(format!(
-                    "no support packages installed; use 'package install <file>.dfx --accept-unsigned' first\npackage directory: {}",
-                    dirs.packages.display()
+                return Err(error::coded(
+                    "PKG001",
+                    format!(
+                        "no support packages installed; use 'package install <file>.dfx --accept-unsigned' first\npackage directory: {}",
+                        dirs.packages.display()
+                    ),
                 ));
             }
             if let Some(outcome) =

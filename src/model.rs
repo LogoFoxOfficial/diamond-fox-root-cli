@@ -133,11 +133,6 @@ impl DeviceGate {
                 self.incremental.as_str(),
                 actual.incremental.as_str(),
             ),
-            (
-                "fingerprint",
-                self.fingerprint.as_str(),
-                actual.fingerprint.as_str(),
-            ),
             ("release", self.release.as_str(), actual.release.as_str()),
             ("kernel", self.kernel.as_str(), actual.kernel.as_str()),
         ];
@@ -146,6 +141,12 @@ impl DeviceGate {
             if expected != actual {
                 result.push(format!("{name}: expected {expected}, got {actual}"));
             }
+        }
+        if !fingerprint_matches(&self.fingerprint, &actual.fingerprint) {
+            result.push(format!(
+                "fingerprint: expected {}, got {}",
+                self.fingerprint, actual.fingerprint
+            ));
         }
         if let Some(expected) = &self.verified_boot
             && expected != &actual.verified_boot
@@ -164,6 +165,43 @@ impl DeviceGate {
             ));
         }
         result
+    }
+
+    pub fn warnings(&self, actual: &DeviceSnapshot) -> Vec<String> {
+        if self.fingerprint == actual.fingerprint
+            || !fingerprint_matches(&self.fingerprint, &actual.fingerprint)
+        {
+            return Vec::new();
+        }
+        let expected = fingerprint_product(&self.fingerprint).unwrap_or("unknown");
+        let detected = fingerprint_product(&actual.fingerprint).unwrap_or("unknown");
+        vec![format!(
+            "Regional fingerprint product differs ({expected} -> {detected}); invariant build fields match"
+        )]
+    }
+}
+
+fn fingerprint_parts(value: &str) -> Option<(&str, &str, &str)> {
+    let (brand, remainder) = value.split_once('/')?;
+    let (product, invariant) = remainder.split_once('/')?;
+    (!brand.is_empty() && !product.is_empty() && !invariant.is_empty())
+        .then_some((brand, product, invariant))
+}
+
+fn fingerprint_product(value: &str) -> Option<&str> {
+    fingerprint_parts(value).map(|(_, product, _)| product)
+}
+
+fn fingerprint_matches(expected: &str, actual: &str) -> bool {
+    if expected == actual {
+        return true;
+    }
+    match (fingerprint_parts(expected), fingerprint_parts(actual)) {
+        (
+            Some((expected_brand, _, expected_invariant)),
+            Some((actual_brand, _, actual_invariant)),
+        ) => expected_brand == actual_brand && expected_invariant == actual_invariant,
+        _ => false,
     }
 }
 
@@ -197,5 +235,42 @@ mod tests {
             flash_locked: None,
         };
         assert_eq!(gate.mismatches(&snapshot).len(), 1);
+    }
+
+    #[test]
+    fn regional_fingerprint_product_is_warning_only() {
+        let mut snapshot = DeviceSnapshot {
+            model: "SM-S918B".into(),
+            device: "dm3q".into(),
+            bootloader: "S918BXXUAZZHL".into(),
+            display: "CP2A.260605.016.S918BXXUAZZHL".into(),
+            incremental: "S918BXXUAZZHL".into(),
+            fingerprint:
+                "samsung/dm3qother/dm3q:17/CP2A.260605.016/S918BXXUAZZHL:user/release-keys".into(),
+            release: "17".into(),
+            kernel: "kernel".into(),
+            verified_boot: "green".into(),
+            flash_locked: "1".into(),
+            ..Default::default()
+        };
+        let gate = DeviceGate {
+            model: snapshot.model.clone(),
+            device: snapshot.device.clone(),
+            bootloader: snapshot.bootloader.clone(),
+            display: snapshot.display.clone(),
+            incremental: snapshot.incremental.clone(),
+            fingerprint: "samsung/dm3qxeea/dm3q:17/CP2A.260605.016/S918BXXUAZZHL:user/release-keys"
+                .into(),
+            release: snapshot.release.clone(),
+            kernel: snapshot.kernel.clone(),
+            verified_boot: Some(snapshot.verified_boot.clone()),
+            flash_locked: Some(snapshot.flash_locked.clone()),
+        };
+        assert!(gate.mismatches(&snapshot).is_empty());
+        assert_eq!(gate.warnings(&snapshot).len(), 1);
+        snapshot.fingerprint =
+            "samsung/dm3qother/dm3q:17/CP2A.260605.016/DIFFERENT:user/release-keys".into();
+        assert_eq!(gate.mismatches(&snapshot).len(), 1);
+        assert!(gate.warnings(&snapshot).is_empty());
     }
 }

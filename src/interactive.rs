@@ -30,7 +30,7 @@ pub fn run(adb: &Adb, dirs: &AppDirs, reporter: &Reporter) -> Result<(), String>
             "5" => continue,
             "0" | "q" | "quit" | "exit" => return Ok(()),
             _ => {
-                reporter.fail("Unknown selection");
+                reporter.error(crate::error::coded("UI001", "unknown selection"));
                 pause();
             }
         }
@@ -44,7 +44,10 @@ fn show_device_summary(adb: &Adb, dirs: &AppDirs, reporter: &Reporter) {
             .filter(|device| device.state == "device")
             .collect::<Vec<_>>(),
         Err(error) => {
-            reporter.fail(format!("ADB unavailable: {error}"));
+            reporter.error(crate::error::coded(
+                "ADB005",
+                format!("ADB unavailable: {error}"),
+            ));
             return;
         }
     };
@@ -57,7 +60,12 @@ fn show_device_summary(adb: &Adb, dirs: &AppDirs, reporter: &Reporter) {
                 println!("Kernel       {}", snapshot.kernel);
                 let packages = installed_packages(dirs).unwrap_or_default();
                 match root::select_package(&packages, &snapshot) {
-                    Ok(package) => println!("Root method  {}", package.manifest.name),
+                    Ok(package) => {
+                        println!("Root method  {}", package.manifest.name);
+                        for warning in package.manifest.gate.warnings(&snapshot) {
+                            reporter.warn(warning);
+                        }
+                    }
                     Err(_) => println!("Root method  Not available for this exact build"),
                 }
                 if let Some(guard) = state::guard_for_boot(dirs, &device.serial, &snapshot.boot_id)
@@ -67,7 +75,7 @@ fn show_device_summary(adb: &Adb, dirs: &AppDirs, reporter: &Reporter) {
                     println!("Boot guard   Ready");
                 }
             }
-            Err(error) => reporter.fail(format!("Device inspection failed: {error}")),
+            Err(error) => reporter.error(format!("Device inspection failed: {error}")),
         },
         _ => reporter.info(format!(
             "Device: {} supported phones connected",
@@ -81,7 +89,10 @@ fn run_root(adb: &Adb, dirs: &AppDirs, reporter: &Reporter) {
         let serial = choose_device(adb)?;
         let packages = installed_packages(dirs)?;
         if packages.is_empty() {
-            return Err("no support package is installed".into());
+            return Err(crate::error::coded(
+                "PKG001",
+                "no support package is installed",
+            ));
         }
         root::run(adb, dirs, &packages, Some(&serial), false, reporter)
     })();
@@ -93,7 +104,7 @@ fn run_root(adb: &Adb, dirs: &AppDirs, reporter: &Reporter) {
             println!("{}", outcome.shell_command);
         }
         Ok(None) => {}
-        Err(error) => reporter.fail(error),
+        Err(error) => reporter.error(error),
     }
     pause();
 }
@@ -105,7 +116,7 @@ fn show_device(adb: &Adb, dirs: &AppDirs, reporter: &Reporter) {
         Ok(())
     });
     if let Err(error) = result {
-        reporter.fail(error);
+        reporter.error(error);
     }
     pause();
 }
@@ -140,7 +151,7 @@ fn install_package(dirs: &AppDirs, reporter: &Reporter) {
         println!("Model         {}", verified.manifest.gate.model);
         println!("Bootloader    {}", verified.manifest.gate.bootloader);
         println!("SHA-256       {}", verified.package_sha256);
-        reporter.fail("Publisher authentication is not available for schema 1 packages");
+        reporter.warn("Publisher authentication is not available for schema 1 packages");
         if !reporter.confirm("Install this unsigned package")? {
             return Ok(None);
         }
@@ -152,7 +163,7 @@ fn install_package(dirs: &AppDirs, reporter: &Reporter) {
             installed.manifest.name, installed.manifest.version
         )),
         Ok(None) => reporter.info("Installation cancelled"),
-        Err(error) => reporter.fail(error),
+        Err(error) => reporter.error(error),
     }
     pause();
 }
@@ -172,7 +183,7 @@ fn show_packages(dirs: &AppDirs, reporter: &Reporter) {
                 );
             }
         }
-        Err(error) => reporter.fail(error),
+        Err(error) => reporter.error(error),
     }
     pause();
 }
@@ -184,7 +195,10 @@ fn choose_device(adb: &Adb) -> Result<String, String> {
         .filter(|device| device.state == "device")
         .collect::<Vec<_>>();
     match devices.as_slice() {
-        [] => Err("no supported Samsung device is online".into()),
+        [] => Err(crate::error::coded(
+            "ADB006",
+            "no supported Samsung device is online",
+        )),
         [device] => Ok(device.serial.clone()),
         _ => {
             println!();
@@ -194,11 +208,11 @@ fn choose_device(adb: &Adb) -> Result<String, String> {
             }
             let selection = prompt("Select device")?
                 .parse::<usize>()
-                .map_err(|_| "invalid device selection")?;
+                .map_err(|_| crate::error::coded("UI002", "invalid device selection"))?;
             devices
                 .get(selection.saturating_sub(1))
                 .map(|device| device.serial.clone())
-                .ok_or_else(|| "invalid device selection".into())
+                .ok_or_else(|| crate::error::coded("UI002", "invalid device selection"))
         }
     }
 }

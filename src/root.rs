@@ -1,4 +1,5 @@
 use crate::adb::{Adb, CommandResult, require_success};
+use crate::error::{ErrorCodeExt, coded};
 use crate::model::{DeviceSnapshot, PackageAsset, SupportPackage, Workflow};
 use crate::output::Reporter;
 use crate::state::{self, AppDirs};
@@ -20,12 +21,44 @@ pub fn select_package<'a>(
         .filter(|package| package.manifest.gate.mismatches(snapshot).is_empty())
         .collect();
     match matches.len() {
-        0 => Err(format!(
-            "no installed package matches {} / {} / {}",
-            snapshot.model, snapshot.bootloader, snapshot.kernel
-        )),
+        0 => {
+            let closest = packages
+                .iter()
+                .map(|package| (package, package.manifest.gate.mismatches(snapshot)))
+                .min_by_key(|(_, mismatches)| mismatches.len());
+            let detail = closest
+                .filter(|(_, mismatches)| !mismatches.is_empty())
+                .map(|(package, mismatches)| {
+                    format!(
+                        "\nClosest profile: {}\nGate differences:\n  - {}",
+                        package.manifest.name,
+                        mismatches.join("\n  - ")
+                    )
+                })
+                .unwrap_or_default();
+            Err(coded(
+                "GATE001",
+                format!(
+                    "no installed package matches {} / {} / {}{detail}",
+                    snapshot.model, snapshot.bootloader, snapshot.kernel
+                ),
+            ))
+        }
         1 => Ok(matches[0]),
-        _ => Err("more than one installed package matches this exact firmware".into()),
+        _ => {
+            let exact: Vec<_> = matches
+                .iter()
+                .copied()
+                .filter(|package| package.manifest.gate.fingerprint == snapshot.fingerprint)
+                .collect();
+            match exact.as_slice() {
+                [package] => Ok(*package),
+                _ => Err(coded(
+                    "GATE002",
+                    "more than one package matches this firmware",
+                )),
+            }
+        }
     }
 }
 
@@ -38,12 +71,13 @@ pub fn run(
     reporter: &Reporter,
 ) -> Result<Option<RootOutcome>, String> {
     reporter.step("Checking ADB");
-    let version = require_success(adb.version()?, "adb version")?;
+    let version =
+        require_success(adb.version().with_code("ADB001")?, "adb version").with_code("ADB002")?;
     reporter.ok(version.stdout.lines().next().unwrap_or("ADB is available"));
 
-    let device = adb.select_supported(serial)?;
+    let device = adb.select_supported(serial).with_code("ADB003")?;
     reporter.ok(format!("Device: {} ({})", device.model_hint, device.serial));
-    let snapshot = adb.snapshot(&device.serial)?;
+    let snapshot = adb.snapshot(&device.serial).with_code("ADB004")?;
     validate_snapshot(&snapshot)?;
     reporter.info(format!("Build: {}", snapshot.display));
     reporter.info(format!("Kernel: {}", snapshot.kernel));
@@ -51,21 +85,27 @@ pub fn run(
 
     let package = select_package(packages, &snapshot)?;
     reporter.ok(format!("Root method: {}", package.manifest.name));
+    for warning in package.manifest.gate.warnings(&snapshot) {
+        reporter.warn(warning);
+    }
     let helper = remote_asset(package, "helper")?;
     if let Some(identity) = root_identity(adb, &device.serial, std::slice::from_ref(&helper)) {
         reporter.ok("Temporary root is already active");
         return Ok(Some(outcome(&device.serial, &helper, identity)));
     }
     if let Some(guard) = state::guard_for_boot(dirs, &device.serial, &snapshot.boot_id) {
-        return Err(format!(
-            "this boot already has a root attempt recorded ({}) - reboot Android before trying again",
-            guard.state
+        return Err(coded(
+            "GUARD001",
+            format!(
+                "this boot already has a root attempt recorded ({}) - reboot Android before trying again",
+                guard.state
+            ),
         ));
     }
 
     if !assume_yes {
         println!();
-        reporter.fail("Do not close this terminal or disconnect USB while root is running.");
+        reporter.warn("Do not close this terminal or disconnect USB while root is running.");
         reporter.info("If the process is interrupted, the phone may crash and reboot.");
         reporter.info("The root workflow can take several minutes. Wait for a final result.");
         println!();
@@ -76,7 +116,7 @@ pub fn run(
     }
 
     reporter.step("Verifying and staging package assets");
-    stage_package(adb, &device.serial, package, reporter)?;
+    stage_package(adb, &device.serial, package, reporter).with_code("STAGE000")?;
     reporter.ok("Package assets match on the phone");
     if let Some(identity) = root_identity(adb, &device.serial, std::slice::from_ref(&helper)) {
         reporter.ok("Temporary root is already active");
@@ -88,7 +128,8 @@ pub fn run(
         &device.serial,
         &snapshot.boot_id,
         &package.manifest.id,
-    )?;
+    )
+    .with_code("GUARD002")?;
     reporter.info("Persistent boot-attempt guard committed");
     let result = execute_attempt(adb, &device.serial, package, reporter);
     match result {
@@ -118,22 +159,31 @@ pub fn run(
 
 fn validate_snapshot(snapshot: &DeviceSnapshot) -> Result<(), String> {
     if snapshot.model != "SM-S918B" || snapshot.device != "dm3q" {
-        return Err(format!(
-            "unsupported device identity: {} / {}",
-            snapshot.model, snapshot.device
+        return Err(coded(
+            "GATE003",
+            format!(
+                "unsupported device identity: {} / {}",
+                snapshot.model, snapshot.device
+            ),
         ));
     }
     if snapshot.boot_completed != "1" {
-        return Err("Android has not completed booting".into());
+        return Err(coded("GATE004", "Android has not completed booting"));
     }
     if !snapshot.identity.starts_with("uid=2000(shell)") {
-        return Err(format!("unexpected ADB identity: {}", snapshot.identity));
+        return Err(coded(
+            "GATE005",
+            format!("unexpected ADB identity: {}", snapshot.identity),
+        ));
     }
     if snapshot.context != "u:r:shell:s0" {
-        return Err(format!("unexpected SELinux context: {}", snapshot.context));
+        return Err(coded(
+            "GATE006",
+            format!("unexpected SELinux context: {}", snapshot.context),
+        ));
     }
     if snapshot.boot_id.is_empty() {
-        return Err("Android boot ID is empty".into());
+        return Err(coded("GATE007", "Android boot ID is empty"));
     }
     Ok(())
 }
@@ -167,26 +217,30 @@ fn stage_package(
             serial,
             &format!("mkdir -p {remote_dir}"),
             Duration::from_secs(15),
-        )?,
+        )
+        .with_code("STAGE001")?,
         "create remote directory",
-    )?;
+    )
+    .with_code("STAGE002")?;
     let mut expected = Vec::new();
     for item in &package.assets {
         let remote = format!("{remote_dir}/{}", item.spec.remote_name);
         reporter.info(format!("Authenticating local {} asset", item.spec.role));
-        let temporary = crate::builtin::TemporaryAsset::create(item)?;
+        let temporary = crate::builtin::TemporaryAsset::create(item).with_code("STAGE003")?;
         reporter.info(format!("Uploading {} asset", item.spec.role));
         let push = adb.push_file(serial, temporary.path(), &remote);
         drop(temporary);
-        require_success(push?, "adb push")?;
+        require_success(push.with_code("STAGE004")?, "adb push").with_code("STAGE005")?;
         require_success(
             adb.shell(
                 serial,
                 &format!("chmod {} {remote}", item.spec.mode),
                 Duration::from_secs(10),
-            )?,
+            )
+            .with_code("STAGE006")?,
             "chmod",
-        )?;
+        )
+        .with_code("STAGE007")?;
         reporter.ok(format!("Staged {} asset", item.spec.role));
         expected.push((remote, item.spec.sha256.to_ascii_lowercase()));
     }
@@ -200,16 +254,21 @@ fn stage_package(
             .join(" ")
     );
     let result = require_success(
-        adb.shell(serial, &command, Duration::from_secs(20))?,
+        adb.shell(serial, &command, Duration::from_secs(20))
+            .with_code("STAGE008")?,
         "remote SHA-256",
-    )?;
+    )
+    .with_code("STAGE009")?;
     let output = result.stdout.to_ascii_lowercase();
     for (remote, hash) in expected {
         if !output
             .lines()
             .any(|line| line.contains(&hash) && line.contains(&remote))
         {
-            return Err(format!("remote asset hash mismatch: {remote}"));
+            return Err(coded(
+                "STAGE010",
+                format!("remote asset hash mismatch: {remote}"),
+            ));
         }
     }
     reporter.ok("Remote asset integrity verified");
@@ -247,10 +306,12 @@ fn execute_attempt(
                 "SLIDE_ONLY=1 EXPLOIT_ATTEMPTS=1 EXPLOIT_ATTEMPT_TIMEOUT_SEC=45 {helper} --run-payload {slide_asset} {helper} {slide_log}"
             );
             let result = require_success(
-                adb.shell(serial, &slide_command, Duration::from_secs(90))?,
+                adb.shell(serial, &slide_command, Duration::from_secs(90))
+                    .with_code("ROOT100")?,
                 "KASLR slide resolver",
-            )?;
-            let slide = parse_tracefs_slide(&result.combined())?;
+            )
+            .with_code("ROOT101")?;
+            let slide = parse_tracefs_slide(&result.combined()).with_code("ROOT102")?;
             reporter.ok(format!("KASLR slide: 0x{slide:x}"));
             format!(
                 "RMG_DURABLE_MILESTONES=1 APP_FOPS_USE_SIGRETURN=1 SLIDE_P0_OFFSET=0x{slide:x} EXPLOIT_ATTEMPTS=1 P0_ATTEMPT_TIMEOUT_SEC={} EXPLOIT_ATTEMPT_TIMEOUT_SEC={} {helper} --run-payload {payload} {helper} {remote_log}",
@@ -354,10 +415,10 @@ fn run_and_poll_root(
                     completed = Some(result);
                     completed_at = Some(Instant::now());
                 }
-                Ok(Err(error)) => return Err(error),
+                Ok(Err(error)) => return Err(coded("ROOT201", error)),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err("root worker disconnected".into());
+                    return Err(coded("ROOT202", "root worker disconnected"));
                 }
             }
         } else {
@@ -369,14 +430,17 @@ fn run_and_poll_root(
             break;
         }
     }
-    Err(match completed {
-        Some(result) => format!(
-            "root identity was not observed after exploit exit {}: {}",
-            result.exit_code,
-            result.combined()
-        ),
-        None => "root identity was not observed before the deadline".into(),
-    })
+    Err(coded(
+        "ROOT203",
+        match completed {
+            Some(result) => format!(
+                "root identity was not observed after exploit exit {}: {}",
+                result.exit_code,
+                result.combined()
+            ),
+            None => "root identity was not observed before the deadline".into(),
+        },
+    ))
 }
 
 fn outcome(serial: &str, helper: &str, identity: String) -> RootOutcome {

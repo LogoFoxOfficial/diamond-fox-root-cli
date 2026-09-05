@@ -155,6 +155,8 @@ Depending on the target profile, checks can include:
 - exploit-attempt state
 - profile-specific intermediate gates
 
+For Samsung firmware fingerprints, the regional product/CSC component may differ between otherwise identical SM-S918B installations. DiamondFox accepts that component with a warning only when the remaining fingerprint, exact build, bootloader, kernel and security-state gates still match.
+
 A failed required check stops the operation.
 
 Example:
@@ -239,6 +241,8 @@ The current Windows release is not Authenticode-signed, so Windows may display a
 ## Diagnostics
 
 DiamondFox prints progress and failures to the terminal. Root profiles may also create working logs inside their package directory under `/data/local/tmp/diamondfox/` on the connected device. The current CLI does not automatically export a persistent host log.
+
+Failures include a stable `DF-...` error code. The code families identify ADB, firmware gates, asset staging, boot guards, package handling, user input or the root workflow. Include that code and the complete accompanying message in issue reports.
 
 Diagnostic output can include:
 
